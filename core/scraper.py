@@ -1,143 +1,166 @@
 import os
-import asyncio
-from datetime import datetime
 from pathlib import Path
-
-from telethon import errors
+from telethon import types
+from telethon.errors import RPCError
+from .db_manager import DatabaseManager
 
 
 class TelegramScraper:
-    def __init__(self, client, vector_db, storage):
-        """
-        :param client: Telethon-клиент (TelegramClient)
-        :param vector_db: экземпляр VectorDatabase
-        :param storage: экземпляр DataManager
-        """
+    def __init__(self, client, db_manager: DatabaseManager, media_path: str):
         self.client = client
-        self.vector_db = vector_db
-        self.storage = storage
-        self.media_path = os.getenv('MEDIA_SAVE_PATH', 'media')
+        self.db_manager = db_manager
+        self.media_path = media_path
 
-    async def _download_media(self, message, channel_name):
+    async def _download_media(self, message: types.Message, channel_name: str) -> list:
         """
-        Скачивает все медиафайлы из сообщения и возвращает список {'path': ..., 'type': ...}
-        Файлы сохраняются в папке: media/<channel_name>/<YYYY-MM-DD>/<message_id>/
+        Скачивает все медиафайлы из сообщения.
         """
-        media_items = []
+        media_paths = []
+        if not message.media:
+            return media_paths
+
+        save_dir = Path(self.media_path) / channel_name / str(message.id)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
         try:
-            if message.media:
-                # Формируем путь: media/<channel_name>/<YYYY-MM-DD>/<message_id>/
-                date_folder = message.date.strftime('%Y-%m-%d')
-                save_dir = Path(self.media_path) / channel_name / date_folder / str(message.id)
-                save_dir.mkdir(parents=True, exist_ok=True)
+            if isinstance(message.media, types.MessageMediaPhoto):
+                media_type = 'photo'
+                file_path = await self.client.download_media(
+                    message.media,
+                    file=save_dir / f'photo_{message.id}.jpg'
+                )
+                if file_path:
+                    media_paths.append({'path': str(file_path), 'type': media_type})
 
-                # Telethon Message может иметь несколько типов media: photo, video, document, audio и т. д.
-                for attr in ('photo', 'video', 'document', 'audio'):
-                    media_obj = getattr(message, attr, None)
-                    if media_obj:
-                        # Скачиваем под уникальным именем
-                        file_path = await self.client.download_media(
-                            media_obj,
-                            file=save_dir / f"{attr}_{media_obj.id}"
-                        )
-                        if file_path:
-                            media_items.append({
-                                'path': str(file_path),
-                                'type': attr
-                            })
+            elif isinstance(message.media, types.MessageMediaDocument):
+                doc = message.media.document
+                mime = doc.mime_type or ''
+                if mime.startswith('video/'):
+                    media_type = 'video'
+                    ext = '.mp4'
+                elif mime.startswith('audio/'):
+                    media_type = 'audio'
+                    ext = '.mp3'
+                elif mime.startswith('image/'):
+                    media_type = 'photo'
+                    ext = '.jpg'
+                else:
+                    media_type = 'document'
+                    ext = '.bin'
+
+                file_path = await self.client.download_media(
+                    message.media,
+                    file=save_dir / f'doc_{message.id}{ext}'
+                )
+                if file_path:
+                    media_paths.append({'path': str(file_path), 'type': media_type})
         except Exception as e:
-            print(f"❌ Ошибка при скачивании медиа (msg {message.id}): {e}")
-        return media_items
+            print(f"  ❌ Ошибка загрузки медиа (msg_id={message.id}): {e}")
 
-    async def _create_post(self, message, channel_name):
+        return media_paths
+
+    async def _create_post(self, message: types.Message, channel_name: str) -> dict:
         """
-        Создаёт словарь-пост с полями:
-        {
-          'channel': <имя канала>,
-          'date': <ISO-строка даты>,
-          'text': <текст или подпись>,
-          'id': <message.id>,
-          'media': [ {'path':..., 'type':...}, ... ]
-        }
+        Формирует словарь с данными поста.
         """
-        # Получаем текст: либо обычный text, либо подпись к медиа (message.message / message.caption)
-        text = message.text or getattr(message, 'message', None) or getattr(message, 'caption', None) or ""
         media = await self._download_media(message, channel_name)
+        text = message.message or message.text or ''
+
+        posted_at = message.date
+        if posted_at and posted_at.tzinfo is not None:
+            posted_at = posted_at.replace(tzinfo=None)
+
         return {
             'channel': channel_name,
-            'date': message.date.isoformat(),
-            'text': text.strip(),
             'id': message.id,
-            'media': [
-                {'path': m['path'], 'type': m['type']} for m in media
-            ]
+            'date': posted_at,
+            'text': text,
+            'media': media
         }
 
-    async def scrape_channel(self, channel_username, limit=30):
+    async def scrape_channel(self, channel_username: str, limit: int = 8) -> list:
         """
-        Парсит канал `channel_username`, возвращает список новых постов (прохождение до последнего saved_date).
-        Логика:
-          1. Читаем последнюю дату, до которой мы уже парсили (из last_dates. json).
-          2. Итерируем сообщения начиная с самых свежих; пока message.date > last_date — проверяем дубликаты и формируем новые посты.
+        Парсит канал с группировкой альбомов.
         """
-        try:
-            # Получаем entity канала
-            channel = await self.client.get_entity(channel_username)
-        except errors.UsernameInvalidError:
-            print(f"❌ Некорректный username или канал не найден: {channel_username}")
-            return []
-        except Exception as e:
-            print(f"❌ Ошибка get_entity для {channel_username}: {e}")
-            return []
-
-        # Считываем last_date (ISO-строка) для этого канала из storage
-        last_date_iso = await self.storage.get_last_date(channel_username)
-        if last_date_iso:
-            try:
-                last_date = datetime.fromisoformat(last_date_iso)
-            except Exception:
-                last_date = None
-        else:
-            last_date = None
-
         new_posts = []
-        counter = 0
+        try:
+            entity = await self.client.get_entity(channel_username)
+        except RPCError as e:
+            print(f"  ❌ Ошибка получения entity для {channel_username}: {e}")
+            return new_posts
 
-        async for message in self.client.iter_messages(channel, limit=limit):
-            # Если прошли до сообщений старше или равных последней сохранённой даты, прекращаем
-            if last_date and message.date <= last_date:
-                break
+        current_group = []
+        try:
+            async for message in self.client.iter_messages(entity, limit=limit):
+                # Пропускаем служебные сообщения
+                if not message.message and not message.media:
+                    continue
 
-            # Берём текст для эмбеддинга
-            text = message.text or getattr(message, 'message', None) or getattr(message, 'caption', None) or ""
-            text = text.strip()
+                # Обработка группированных сообщений (альбомы)
+                if message.grouped_id:
+                    if current_group and current_group[0].grouped_id != message.grouped_id:
+                        # Новая группа, обрабатываем предыдущую
+                        group_post = await self._process_group(current_group, channel_username)
+                        if group_post:
+                            new_posts.append(group_post)
+                        current_group = [message]
+                    else:
+                        current_group.append(message)
+                else:
+                    if current_group:
+                        # Завершаем текущую группу
+                        group_post = await self._process_group(current_group, channel_username)
+                        if group_post:
+                            new_posts.append(group_post)
+                        current_group = []
 
-            # Генерируем нормированный эмбеддинг и проверяем, не дубликат ли он
-            embedding = self.vector_db.text_to_embedding(text)
-            if self.vector_db.is_duplicate(embedding):
-                # Такой текст/подпись уже был — пропускаем, не скачиваем медиа
-                continue
+                    # Обработка одиночного сообщения
+                    post_data = await self._create_post(message, channel_username)
+                    added = await self.db_manager.add_post(post_data)
+                    if added:
+                        new_posts.append(post_data)
 
-            # Если не дубликат, создаём полный пост (со скачиванием медиа)
-            post = await self._create_post(message, channel_username)
-            # Добавляем пост в векторную БД (сохраняем эмбеддинг внутри)
-            added = self.vector_db.add_post(post)
-            if not added:
-                # На всякий случай: векторная БД могла сказать, что это дубликат (например, из-за погрешности),
-                # тогда удаляем скачанные файлы, если они были
-                for m in post.get('media', []):
-                    try:
-                        if os.path.exists(m['path']):
-                            os.remove(m['path'])
-                            dir_path = Path(m['path']).parent
-                            if not any(dir_path.iterdir()):
-                                dir_path.rmdir()
-                    except Exception:
-                        pass
-                continue
+            # Обработка оставшейся группы
+            if current_group:
+                group_post = await self._process_group(current_group, channel_username)
+                if group_post:
+                    new_posts.append(group_post)
 
-            new_posts.append(post)
-            counter += 1
+        except Exception as e:
+            print(f"  ❌ Ошибка итерации по {channel_username}: {e}")
 
-        print(f"   Проверено сообщений: {counter}. Новых добавлено: {len(new_posts)}.")
         return new_posts
+
+    async def _process_group(self, messages: list, channel_name: str) -> dict:
+        """
+        Обрабатывает группу сообщений как один пост.
+        """
+        if not messages:
+            return None
+
+        # Скачиваем медиа из всех сообщений группы
+        all_media = []
+        for msg in messages:
+            media = await self._download_media(msg, channel_name)
+            all_media.extend(media)
+
+        # Берем данные из первого сообщения
+        first_msg = messages[0]
+        text = first_msg.message or first_msg.text or ''
+
+        posted_at = first_msg.date
+        if posted_at and posted_at.tzinfo is not None:
+            posted_at = posted_at.replace(tzinfo=None)
+
+        post_data = {
+            'channel': channel_name,
+            'id': first_msg.id,
+            'date': posted_at,
+            'text': text,
+            'media': all_media,
+            'is_album': True  # Флаг альбома
+        }
+
+        # Добавляем в БД
+        added = await self.db_manager.add_post(post_data)
+        return post_data if added else None
