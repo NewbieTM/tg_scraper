@@ -1,11 +1,12 @@
 import os
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from .db_models import Base, Post, Media
+from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 
-class DatabaseManager:
+
+class DBManager:
     def __init__(self):
         db_config = {
             'host': os.getenv('DB_HOST'),
@@ -29,58 +30,56 @@ class DatabaseManager:
             await conn.run_sync(Base.metadata.create_all)
         print("✅ База данных инициализирована")
 
+
     async def add_post(self, post_data: dict) -> bool:
         async with self.async_session() as session:
-            try:
-                # Проверка существования поста
-                stmt = select(Post).where(
-                    Post.post_id == post_data['id'],
-                    Post.channel == post_data['channel']
-                )
-                result = await session.execute(stmt)
-                if result.scalars().first():
-                    return False
+            new_post = Post(
+                post_id=post_data['id'],
+                channel_name=post_data['channel'],
+                date=post_data['date'],
+                text=post_data['text']
+            )
 
-                new_post = Post(
-                    post_id=post_data['id'],
-                    channel=post_data['channel'],
-                    post_date=post_data['date'],
-                    post_text=post_data['text'],
-                    is_album=post_data.get('is_album', False)
-                )
-
-                for m in post_data.get('media', []):
-                    new_media = Media(
-                        file_path=m['path'],
-                        media_type=m['type']
+            for m in post_data.get('media', []):
+                new_post.media.append(
+                    Media(
+                        post_id=post_data['id'],
+                        channel_name=post_data['channel'],
+                        media_type=m['type'],
+                        file_path=m['file_path']
                     )
-                    new_post.media.append(new_media)
+                )
 
-                session.add(new_post)
+            session.add(new_post)
+            try:
                 await session.commit()
                 return True
+            except IntegrityError:
+                await session.rollback()
+                return False
             except Exception as e:
                 await session.rollback()
-                print(f"  ❌ Ошибка добавления поста: {e}")
+                print(f"❌ Ошибка добавления поста: {e}")
                 return False
 
     async def mark_post_published(self, post_id: int, channel: str) -> bool:
         async with self.async_session() as session:
             try:
-                stmt = select(Post).where(
-                    Post.post_id == post_id,
-                    Post.channel == channel
+                stmt = (
+                    update(Post)
+                    .where(
+                        Post.post_id == post_id,
+                        Post.channel_name == channel
+                    )
+                    .values(published=True)
+                    .execution_options(synchronize_session="fetch")
                 )
                 result = await session.execute(stmt)
-                post = result.scalars().first()
-                if post:
-                    post.published = True
-                    await session.commit()
-                    return True
-                return False
+                await session.commit()
+                return result.rowcount > 0
             except Exception as e:
                 await session.rollback()
-                print(f"  ❌ Ошибка отметки публикации: {e}")
+                print(f"❌ Ошибка отметки публикации: {e}")
                 return False
 
     async def close(self):

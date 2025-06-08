@@ -6,23 +6,11 @@ from telethon.errors import FloodWaitError, ChatAdminRequiredError, UserPrivacyR
 
 
 class ChannelPublisher:
-    """
-    Отвечает за публикацию постов с поддержкой альбомов.
-    """
 
-    def __init__(
-            self,
-            client,
-            target_channel: str,
-            max_media: int = 10,
-            max_caption: int = 1000,
-            delay: int = 2
-    ):
+    def __init__(self, client, target_channel: str, delay: int = 2):
         self.client = client
         self.target_channel = target_channel
         self.channel_entity = None
-        self.max_caption = max_caption
-        self.max_media = max_media
         self.delay = delay
 
     async def initialize(self):
