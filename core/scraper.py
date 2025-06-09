@@ -102,8 +102,8 @@ class TGScraper:
 
         texts = []
         for msg in group:
-            if msg.raw_text and msg.raw_text.strip():
-                texts.append(msg.raw_text.strip())
+            if msg.text and msg.text.strip():
+                texts.append(msg.text.strip())
 
         post_data['text'] = "\n\n".join(texts) if texts else ""
 
@@ -122,7 +122,7 @@ class TGScraper:
             'id': msg.id,
             'channel': channel_name,
             'date': msg.date,
-            'text': msg.raw_text,
+            'text': msg.text,
             'media': []
         }
 

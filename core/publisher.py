@@ -1,123 +1,53 @@
-import os
-import asyncio
+from telethon import TelegramClient
+from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
+from core.db_manager import DBManager
+from core.db_models import Post
 from pathlib import Path
-from telethon import types
-from telethon.errors import FloodWaitError, ChatAdminRequiredError, UserPrivacyRestrictedError
+import asyncio
 
-
-class ChannelPublisher:
-
-    def __init__(self, client, target_channel: str, delay: int = 2):
+class PostPublisher:
+    def __init__(self, client: TelegramClient, db_manager: DBManager, target_channel: str, post_delay):
         self.client = client
+        self.db_manager = db_manager
         self.target_channel = target_channel
-        self.channel_entity = None
-        self.delay = delay
+        self.post_delay = post_delay
 
-    async def initialize(self):
-        try:
-            self.channel_entity = await self.client.get_entity(self.target_channel)
-        except Exception as e:
-            raise RuntimeError(f"Ошибка получения канала {self.target_channel}: {e}")
-
-    def _prepare_caption(self, post: dict) -> str:
-        base_text = post.get('text', '') or ''
-        source = f"\n\nИсточник: @{post['channel']}" if post.get('channel') else ''
-        full_caption = base_text + source
-        return full_caption[:self.max_caption]
-
-    async def _send_text(self, caption: str) -> bool:
-        if not caption:
-            return False
-
-        parts = [caption[i:i + 4096] for i in range(0, len(caption), 4096)]
-        try:
-            for part in parts:
-                await self.client.send_message(
-                    self.channel_entity,
-                    part,
-                    link_preview=False
-                )
-                await asyncio.sleep(self.delay)
-            return True
-        except Exception as e:
-            print(f"  ❌ Ошибка отправки текста: {e}")
-            return False
-
-    async def _send_media_album(self, media_list: list, caption: str) -> bool:
-        """
-        Отправляет альбом медиа с подписью.
-        """
-        valid_media = []
-        for media in media_list:
-            path = Path(media['path'])
-            if path.exists():
-                valid_media.append(path)
-
-        if not valid_media:
-            return False
-
-        try:
-            # Первый элемент с подписью, остальные без
-            album_entities = [valid_media[0]]
-            if caption:
-                album_entities[0] = (album_entities[0], caption)
-
-            if len(valid_media) > 1:
-                album_entities.extend(valid_media[1:])
-
-            await self.client.send_file(
-                self.channel_entity,
-                file=album_entities,
-                supports_streaming=True
-            )
-            return True
-        except FloodWaitError as e:
-            print(f"  ⏱️ FloodWait: ждем {e.seconds} сек.")
-            await asyncio.sleep(e.seconds)
-            return False
-        except Exception as e:
-            print(f"  ❌ Ошибка отправки альбома: {e}")
-            return False
-
-    async def publish(self, post: dict) -> bool:
-        caption = self._prepare_caption(post)
-        media_list = post.get('media', [])
-        is_album = post.get('is_album', False)
-
-        try:
-            # Отправка альбома
-            if is_album and media_list:
-                return await self._send_media_album(media_list, caption)
-
-            # Отправка одиночного медиа
-            elif media_list:
-                media = media_list[0]
-                path = Path(media['path'])
-                if not path.exists():
-                    print(f"  ⚠️ Файл {path} не найден")
-                    return False
-
-                await self.client.send_file(
-                    self.channel_entity,
-                    file=path,
-                    caption=caption,
-                    supports_streaming=True
-                )
-                return True
-
-            # Отправка текста
-            else:
-                return await self._send_text(caption)
-
-        except Exception as e:
-            print(f"  ❌ Ошибка публикации: {e}")
-            return False
-
-    async def clean_media(self, post: dict) -> None:
-        for media in post.get('media', []):
+    async def publish_posts(self):
+        posts = await self._get_unpublished_posts()
+        for post in reversed(posts):
             try:
-                path = Path(media['path'])
-                if path.exists():
-                    path.unlink()
+                print(f"[PUBLISH] Публикую пост {post.post_id} из канала @{post.channel_name}")
+                await self._publish_post(post)
+                await self.db_manager.mark_post_published(post.post_id, post.channel_name)
+                print(f"[SUCCESS] Пост {post.post_id} успешно опубликован")
+                await asyncio.sleep(self.post_delay)
             except Exception as e:
-                print(f"  ⚠️ Ошибка удаления {path}: {e}")
+                print(f"[ERROR] Не удалось опубликовать пост {post.post_id}: {e}")
+
+    async def _get_unpublished_posts(self) -> list[Post]:
+        async with self.db_manager.async_session() as session:
+            result = await session.execute(
+                select(Post)
+                .options(selectinload(Post.media))
+                .where(Post.published == False)
+                .order_by(Post.date.desc())
+            )
+            return result.scalars().all()
+
+    async def _publish_post(self, post: Post):
+        media_files = [Path(media.file_path) for media in post.media]
+
+        for media_file in media_files:
+            if not media_file.exists():
+                raise FileNotFoundError(f"Медиафайл не найден: {media_file}")
+        if not media_files:
+            await self.client.send_message(self.target_channel, post.text, parse_mode='md')
+        else:
+            await self.client.send_file(
+                self.target_channel,
+                [str(f) for f in media_files],
+                caption=post.text,
+                parse_mode='md',
+                force_document=False
+            )

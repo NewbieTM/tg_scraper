@@ -7,6 +7,7 @@ import shutil
 from core.client import TelegramClientManager
 from core.scraper import TGScraper
 from core.db_manager import DBManager
+from core.publisher import PostPublisher
 
 load_dotenv()
 
@@ -32,6 +33,7 @@ CONFIG = {
     'MY_CHANNEL': os.environ.get('MY_CHANNEL'),
     'POST_LIMIT': int(os.environ.get('POST_LIMIT', 5)),
     'PARSE_INTERVAL': int(os.environ.get('PARSE_INTERVAL', 3600)),
+    'PUBLISH_DELAY': int(os.environ.get('PUBLISH_DELAY', 10)),
 }
 
 async def main():
@@ -60,13 +62,16 @@ async def main():
 
     scraper = TGScraper(tg_client, CONFIG['POST_LIMIT'], db, 'media')
 
-    # while True:
-    for channel in CONFIG['CHANNELS']:
-        await scraper.scrape_posts_from_one_channel(channel)
+    publisher = PostPublisher(tg_client, db, target_channel=CONFIG['MY_CHANNEL'], post_delay=CONFIG['PUBLISH_DELAY'])
 
+    while True:
+        for channel in CONFIG['CHANNELS']:
+            await scraper.scrape_posts_from_one_channel(channel)
+            print(f'Посты с канала {channel} распаршены, перехожу к следующему каналу')
 
-
-        # await asyncio.sleep(CONFIG['PARSE_INTERVAL'])
+        await publisher.publish_posts()
+        print(f'Все посты опубликованы, следующий парсинг через {CONFIG['PARSE_INTERVAL']}')
+        await asyncio.sleep(CONFIG['PARSE_INTERVAL'])
 
 
 
