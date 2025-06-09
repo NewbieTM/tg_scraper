@@ -1,5 +1,6 @@
 from pathlib import Path
 
+
 class TGScraper:
     def __init__(self, client, post_limit: int, db, download_root: str = "media"):
         self.client = client
@@ -89,6 +90,12 @@ class TGScraper:
 
     async def _process_group(self, channel_name: str, group: list):
         group_id = group[0].id
+
+        # Проверяем, существует ли пост в базе
+        if await self.db.post_exists(group_id, channel_name):
+            print(f"Пост {group_id} уже существует в базе, пропускаем")
+            return 0
+
         post_dir = Path(self.download_root) / channel_name / str(group_id)
         post_dir.mkdir(parents=True, exist_ok=True)
 
@@ -115,6 +122,11 @@ class TGScraper:
         return 1 if await self.db.add_post(post_data) else 0
 
     async def _process_single_message(self, channel_name: str, msg):
+        # Проверяем, существует ли пост в базе
+        if await self.db.post_exists(msg.id, channel_name):
+            print(f"Пост {msg.id} уже существует в базе, пропускаем")
+            return 0
+
         post_dir = Path(self.download_root) / channel_name / str(msg.id)
         post_dir.mkdir(parents=True, exist_ok=True)
 
@@ -133,7 +145,18 @@ class TGScraper:
 
     async def _download_media(self, message, directory: Path, media_list: list):
         try:
-            downloaded = await self.client.download_media(message, file=directory)
+            # Проверяем существование файла перед скачиванием
+            potential_path = directory / f"{message.id}_media"
+            if potential_path.exists():
+                print(f"Медиа уже существует: {potential_path}")
+                return
+
+            downloaded = await self.client.download_media(
+                message,
+                file=directory,
+                thumb=-1 if hasattr(message.media, 'photo') else None
+            )
+
             paths = downloaded if isinstance(downloaded, list) else [downloaded]
 
             for path in paths:

@@ -22,8 +22,6 @@ if missing:
     print(f"❌ Отсутствуют обязательные переменные окружения: {', '.join(missing)}")
     sys.exit(1)
 
-
-
 CONFIG = {
     'API_ID': os.environ.get('API_ID'),
     'API_HASH': os.environ.get('API_HASH'),
@@ -37,16 +35,19 @@ CONFIG = {
 }
 
 async def main():
-
     media_folder = 'media'
     if os.path.exists(media_folder):
         shutil.rmtree(media_folder)
     os.makedirs(media_folder, exist_ok=True)
 
-
-    tg_client_manager = TelegramClientManager(CONFIG['SESSION_FILE'], CONFIG['API_ID'], CONFIG['API_HASH'], CONFIG['PHONE'])
+    tg_client_manager = TelegramClientManager(
+        CONFIG['SESSION_FILE'],
+        CONFIG['API_ID'],
+        CONFIG['API_HASH'],
+        CONFIG['PHONE']
+    )
     try:
-         tg_client = await tg_client_manager.start()
+        tg_client = await tg_client_manager.start()
     except Exception as e:
         print(f"❌ Не удалось запустить TelegramClientManager: {e}")
         return
@@ -59,10 +60,13 @@ async def main():
         await tg_client.disconnect()
         return
 
-
     scraper = TGScraper(tg_client, CONFIG['POST_LIMIT'], db, 'media')
-
-    publisher = PostPublisher(tg_client, db, target_channel=CONFIG['MY_CHANNEL'], post_delay=CONFIG['PUBLISH_DELAY'])
+    publisher = PostPublisher(
+        tg_client,
+        db,
+        target_channel=CONFIG['MY_CHANNEL'],
+        post_delay=CONFIG['PUBLISH_DELAY']
+    )
 
     while True:
         for channel in CONFIG['CHANNELS']:
@@ -70,10 +74,8 @@ async def main():
             print(f'Посты с канала {channel} распаршены, перехожу к следующему каналу')
 
         await publisher.publish_posts()
-        print(f'Все посты опубликованы, следующий парсинг через {CONFIG['PARSE_INTERVAL']}')
+        print(f'Все посты опубликованы, следующий парсинг через {CONFIG["PARSE_INTERVAL"]}')
         await asyncio.sleep(CONFIG['PARSE_INTERVAL'])
-
-
 
 if __name__ == '__main__':
     asyncio.run(main())

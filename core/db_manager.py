@@ -2,8 +2,9 @@ import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from .db_models import Base, Post, Media
-from sqlalchemy import update
+from sqlalchemy import update, delete, and_, func, select
 from sqlalchemy.exc import IntegrityError
+from datetime import datetime, timedelta, timezone
 
 
 class DBManager:
@@ -29,10 +30,26 @@ class DBManager:
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         print("✅ База данных инициализирована")
+        await self.cleanup_old_posts(days=3)
 
+    async def post_exists(self, post_id: int, channel_name: str) -> bool:
+        """Проверяет, существует ли пост в базе"""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(Post).where(
+                    Post.post_id == post_id,
+                    Post.channel_name == channel_name
+                )
+            )
+            return result.scalar() is not None
 
     async def add_post(self, post_data: dict) -> bool:
         async with self.async_session() as session:
+            # Проверяем, существует ли пост
+            exists = await self.post_exists(post_data['id'], post_data['channel'])
+            if exists:
+                return False
+
             new_post = Post(
                 post_id=post_data['id'],
                 channel_name=post_data['channel'],
@@ -82,7 +99,50 @@ class DBManager:
                 print(f"❌ Ошибка отметки публикации: {e}")
                 return False
 
+    async def cleanup_old_posts(self, days: int = 3):
+        """Удаляет неопубликованные посты старше указанного количества дней"""
+        async with self.async_session() as session:
+            try:
+                threshold = datetime.now(timezone.utc) - timedelta(days=days)
 
+                # Сначала получаем медиа для удаления
+                media_to_delete = await session.execute(
+                    select(Media.file_path)
+                    .join(Post)
+                    .where(
+                        and_(
+                            Post.published == False,
+                            Post.date < threshold
+                        )
+                    )
+                )
+                media_files = [m[0] for m in media_to_delete.all()]
+
+                # Удаляем посты из БД
+                stmt = delete(Post).where(
+                    and_(
+                        Post.published == False,
+                        Post.date < threshold
+                    )
+                )
+                result = await session.execute(stmt)
+                await session.commit()
+
+                # Удаляем файлы медиа
+                for file_path in media_files:
+                    try:
+                        path = Path(file_path)
+                        if path.exists():
+                            path.unlink()
+                    except Exception as e:
+                        print(f"Ошибка удаления файла {file_path}: {e}")
+
+                print(f"🗑️ Удалено {result.rowcount} старых неопубликованных постов")
+                return result.rowcount
+            except Exception as e:
+                await session.rollback()
+                print(f"❌ Ошибка очистки старых постов: {e}")
+                return 0
 
     async def close(self):
         await self.engine.dispose()
