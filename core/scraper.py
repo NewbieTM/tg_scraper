@@ -91,13 +91,16 @@ class TGScraper:
     async def _process_group(self, channel_name: str, group: list):
         group_id = group[0].id
 
-        # Проверяем, существует ли пост в базе
         if await self.db.post_exists(group_id, channel_name):
             print(f"Пост {group_id} уже существует в базе, пропускаем")
             return 0
 
-        post_dir = Path(self.download_root) / channel_name / str(group_id)
-        post_dir.mkdir(parents=True, exist_ok=True)
+        has_media = any(msg.media for msg in group)
+        post_dir = None
+
+        if has_media:
+            post_dir = Path(self.download_root) / channel_name / str(group_id)
+            post_dir.mkdir(parents=True, exist_ok=True)
 
         post_data = {
             'id': group_id,
@@ -115,20 +118,23 @@ class TGScraper:
         post_data['text'] = "\n\n".join(texts) if texts else ""
 
         for i, msg in enumerate(group):
-            if msg.media:
+            if msg.media and has_media:
                 print(f"Скачиваем медиа {i + 1}/{len(group)} для альбома {group_id}")
                 await self._download_media(msg, post_dir, post_data['media'])
 
         return 1 if await self.db.add_post(post_data) else 0
 
     async def _process_single_message(self, channel_name: str, msg):
-        # Проверяем, существует ли пост в базе
         if await self.db.post_exists(msg.id, channel_name):
             print(f"Пост {msg.id} уже существует в базе, пропускаем")
             return 0
 
-        post_dir = Path(self.download_root) / channel_name / str(msg.id)
-        post_dir.mkdir(parents=True, exist_ok=True)
+        has_media = bool(msg.media)
+        post_dir = None
+
+        if has_media:
+            post_dir = Path(self.download_root) / channel_name / str(msg.id)
+            post_dir.mkdir(parents=True, exist_ok=True)
 
         post_data = {
             'id': msg.id,
@@ -138,14 +144,13 @@ class TGScraper:
             'media': []
         }
 
-        if msg.media:
+        if has_media:
             await self._download_media(msg, post_dir, post_data['media'])
 
         return 1 if await self.db.add_post(post_data) else 0
 
     async def _download_media(self, message, directory: Path, media_list: list):
         try:
-            # Проверяем существование файла перед скачиванием
             potential_path = directory / f"{message.id}_media"
             if potential_path.exists():
                 print(f"Медиа уже существует: {potential_path}")

@@ -14,6 +14,7 @@ class PostPublisher:
         self.db_manager = db_manager
         self.target_channel = target_channel
         self.post_delay = post_delay
+        self.max_caption_length = 1024
 
     async def publish_posts(self):
         posts = await self._get_unpublished_posts()
@@ -23,10 +24,8 @@ class PostPublisher:
                 success = await self._publish_post(post)
 
                 if success:
-                    # Помечаем пост как опубликованный
                     marked = await self.db_manager.mark_post_published(post.post_id, post.channel_name)
 
-                    # Удаляем медиа после успешной публикации
                     if marked:
                         await self._cleanup_media(post)
                         print(f"[SUCCESS] Пост {post.post_id} опубликован, медиа удалены")
@@ -48,7 +47,6 @@ class PostPublisher:
             return result.scalars().all()
 
     async def _publish_post(self, post: Post) -> bool:
-        # Фильтруем только существующие медиа-файлы
         media_files = []
         for media in post.media:
             media_path = Path(media.file_path)
@@ -62,10 +60,12 @@ class PostPublisher:
                 print(f"[SKIPPED] Пост {post.post_id} не содержит контента")
                 return False
 
+            caption = self._process_caption(post.text)
+
             if not media_files:
                 await self.client.send_message(
                     self.target_channel,
-                    post.text,
+                    caption,
                     parse_mode='md'
                 )
                 return True
@@ -73,7 +73,7 @@ class PostPublisher:
                 await self.client.send_file(
                     self.target_channel,
                     [str(f) for f in media_files],
-                    caption=post.text if post.text.strip() else None,
+                    caption=caption if caption.strip() else None,
                     parse_mode='md',
                     force_document=False
                 )
@@ -82,8 +82,14 @@ class PostPublisher:
             print(f"[ERROR] Ошибка публикации: {e}")
             return False
 
+    def _process_caption(self, text: str) -> str:
+        if len(text) > self.max_caption_length:
+            print(f'Пост был обрезан до длины в {max_caption_length}')
+            return text[:self.max_caption_length - 3] + "..."
+        return text
+
+
     async def _cleanup_media(self, post: Post):
-        """Удаляет медиа-файлы после успешной публикации"""
         for media in post.media:
             try:
                 media_path = Path(media.file_path)
